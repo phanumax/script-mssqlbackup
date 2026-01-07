@@ -1,51 +1,71 @@
-# CAB Presentation: SQL Backup Strategy Enhancement (12/7)
+# Change Advisory Board (CAB) Presentation
+## Title: Implementation of 12/7 SQL Backup & Storage Optimization
 
-**Date:** 2026-01-06
-**Project:** SQL Server 12/7 Backup Strategy
-**Presenter:** [Name]
+> **Date:** 2026-01-07
+> **Presenter:** DevOps Team
+> **Risk Level:** Medium (Service Impact during execution)
 
 ---
 
-## 1. Executive Summary
-We are implementing a standardized **12/7 Backup Strategy** (12-hour RPO, 7-day Retention) for critical SQL Server databases. This change introduces automated, secure provisioning scripts that separate operational backup tasks from administrative maintenance, enforcing **Least Privilege**.
+### 1. Executive Summary
+ขออนุมัติ Deploy ระบบ **Automated SQL Backup** และทำ **Storage Optimization** เนื่องจากการตรวจสอบพบว่า Transaction Log มีขนาดใหญ่ผิดปกติ (Bloated Log)
 
-## 2. Business Goal & Value
-*   **Reliability:** Guarantees uniform 12-hour Recovery Point Objective (RPO).
-*   **Compliance:** Enforces 7-day retention policy automatically.
-*   **Security:** Fixes permission issues by isolating high-privilege cleanup tasks from standard backup operations.
+**Objective:**
+- ปรับใช้ Strategy แบบ **12/7** (Weekly Full + Daily/12h Differential)
+- แก้ปัญหา **Transaction Log บวม (56GB)** โดยการ Resize กลับสู่ขนาดปกติ (Reclaim Space)
+- ลดความเสี่ยง Data Loss และลด **RPO** เหลือ 12 ชั่วโมง
 
-## 3. The 12/7 Strategy
-| Component | Detail | Schedule |
+---
+
+### 2. Change Scope
+- **Deploy Scripts:**
+    - `Provision-Backup-12-7-Final.ps1`: สร้าง Backup Job และ Force Set Recovery Model เป็น **SIMPLE**
+- **Target System:** Database `PRSystem`
+- **Cleanup Process:** SysAdmin จะดูแลการลบไฟล์เก่า (Manual Process)
+
+---
+
+### 3. Impact Analysis & Optimization Plan
+**⚠️ Current State Analysis:**
+จากภาพ Log File Usage พบความผิดปกติ:
+- **Data File (.mdf):** ~10 GB (Normal Size)
+- **Log File (.ldf):** **~56 GB** (Critical - ใหญ่กว่าข้อมูลจริง 5 เท่า)
+
+**Optimization Benefit:**
+หลังการเปลี่ยน Recovery Model เป็น SIMPLE จะสามารถทำ **Log Shrink** เพื่อขอคืนพื้นที่ Storage ได้ประมาณ **50 GB**
+
+**Downtime Requirement:**
+ขอเสนอ **Maintenance Window 1 ชั่วโมง** (Sunday 21:00) เพื่อดำเนินการ:
+1.  Full Backup ข้อมูลปัจจุบัน (10GB)
+2.  Switch Recovery Model -> SIMPLE
+3.  **Halt Operations & Shrink Log File** (ลดขนาดจาก 56GB -> <1GB)
+
+---
+
+### 4. Implementation Steps
+1.  **Prep:** เช็ค Disk Space (ต้องว่าง > 30GB สำหรับ Backup ก่อน Shrink)
+2.  **Execute Script:** รัน `Provision-Backup-12-7-Final.ps1` (Script จะปรับ Recovery Model เป็น SIMPLE ให้อัตโนมัติ)
+3.  **Full Backup:** สั่ง Start Job "Weekly Full Backup" ทันที
+4.  **Optimization (Critical Step):**
+    - เมื่อ Backup เสร็จสิ้น และ Log ถูก Truncate แล้ว
+    - สั่ง **DBCC SHRINKFILE** (เฉพาะ Log File) เพื่อคืนพื้นที่ 50GB
+5.  **Verify:** ตรวจสอบขนาดไฟล์ Log ต้องเล็กลง และ Full Backup ต้องสมบูรณ์
+
+---
+
+### 5. Risk & Mitigation
+| Risk | Probability | Mitigation |
 | :--- | :--- | :--- |
-| **Full Backup** | Complete database copy | **Sundays 21:00** |
-| **Diff Backup** | Changes since last Full | **Daily 09:00 + Mon-Sat 21:00** |
-| **Cleanup** | Auto-remove files > 7 days | **Daily 23:00** |
+| **Log Shrink Fail** | Low | ทำ Full Backup ไว้ก่อนดำเนินการเสมอ |
+| **I/O Overhead** | High | ทำงานในช่วง Maintenance Window เท่านั้น |
 
-## 4. Implementation Details (Technical)
-We have refactored the provisioning process into two distinct components to satisfy **DevSecOps** principles:
+---
 
-### A. Operational Backups (Standard User)
-*   **Script:** `Provision-Backup-12-7-Final.ps1`
-*   **Owner:** Standard Service Account (`sqlbackup`)
-*   **Scope:** Creates Full and Differential jobs only.
-*   **Risk:** Low (Standard SQL permissions).
+### 6. Rollback Plan
+1.  **Restore:** หากข้อมูลเสียหาย ให้ Restore จากไฟล์ Full Backup ที่ทำไว้ในขั้นตอนที่ 3
+2.  **Revert Job:** Disable SQL Agent Job ที่สร้างใหม่
 
-### B. Maintenance/Cleanup (Admin)
-*   **Script:** `Provision-Cleanup.ps1`
-*   **Owner:** System Administrator (`sa`)
-*   **Rationale:** The cleanup command (`xp_delete_file`) dictates `sysadmin` privileges. By isolating this into a separate job owned by `sa`, we avoid granting elevated rights to the standard backup user.
+---
 
-## 5. Risk Assessment & Mitigation
-| Risk | Probability | Impact | Mitigation |
-| :--- | :--- | :--- | :--- |
-| **Job Failure** | Low | Medium | SQL Agent Alerts + Daily Monitoring. |
-| **Privilege Escalation** | Low | High | Separation of Duties (Cleanup uses specific script). |
-| **Data Loss** | Very Low | Critical | DRY RUN verification before deployment; Standard Recovery Model (SIMPLE). |
-
-## 6. Rollback Plan
-1.  **Stop Jobs:** Disable the created SQL Agent jobs.
-2.  **Delete Jobs:** Remove `Weekly Full...`, `12h Differential...`, and `Backup Cleanup...` from SQL Agent.
-3.  **Restore:** (If needed) Re-enable previous maintenance plans.
-
-## 7. Request for Approval
-Requesting approval to deploy the **Separated Provisioning Scripts** to [Target Enironment/Production].
+### 7. Approval Request
+ขออนุมัติ Deploy และทำ Storage Optimization เพื่อเรียกคืนพื้นที่ 50GB ใน Maintenance Window รอบถัดไป
