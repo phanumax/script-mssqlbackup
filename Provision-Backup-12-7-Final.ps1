@@ -28,14 +28,17 @@
 .PARAMETER KeepDays
   Retention period in days (default: 7)
 
+.PARAMETER StartTime
+  Backup start time in HH:mm format (default: "21:00"). Secondary slot is calculated as +12 hours.
+
 .PARAMETER DryRun
   Test mode - shows SQL commands without executing
 
 .EXAMPLE
-  .\Provision-SQLBackup.ps1 -SqlInstance "localhost" -DatabaseName "MyDB"
+  .\Provision-Backup-12-7-Final.ps1 -SqlInstance "localhost" -DatabaseName "MyDB"
 
 .EXAMPLE
-  .\Provision-SQLBackup.ps1 -SqlInstance "SERVER\INST" -DatabaseName "MyDB" -BackupFolder "D:\Backups" -DryRun
+  .\Provision-Backup-12-7-Final.ps1 -SqlInstance "SERVER\INST" -DatabaseName "MyDB" -BackupFolder "D:\Backups" -StartTime "22:30" -DryRun
 #>
 
 [CmdletBinding()]
@@ -45,6 +48,7 @@ param(
     [string]$BackupFolder       = "C:\Daily_backup",
     [string]$OwnerAccountSuffix = "sqlbackup",
     [string]$AgentServerName    = "(LOCAL)",
+    [string]$StartTime          = "21:00",
     [int]$KeepDays              = 7,
     [switch]$DryRun
 )
@@ -66,7 +70,7 @@ function Invoke-Tsql {
         return 
     }
     
-    $cmdObj = Get-Command sqlcmd.exe -ErrorAction SilentlyContinue
+    $cmdObj = Get-Command sqlcmd.exe -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $cmdObj) { 
         throw "sqlcmd.exe not found. Please install SQL Server Command Line Utilities." 
     }
@@ -77,9 +81,11 @@ function Invoke-Tsql {
         # ใช้ UTF8 encoding เพื่อให้ sqlcmd อ่าน Single Quote ได้แม่นยำ
         [System.IO.File]::WriteAllText($tmpFile, $SqlText, [System.Text.Encoding]::UTF8)
         
-        & $cmdObj.Source -S "$Server" -d "$Db" -i "$tmpFile" -b 2>&1 | Out-Null
+        $output = & $cmdObj -S "$Server" -d "$Db" -i "$tmpFile" -b 2>&1
         
         if ($LASTEXITCODE -ne 0) { 
+            Write-Host "`n[SQLCMD ERROR OUTPUT]" -ForegroundColor Red
+            $output | ForEach-Object { Write-Host $_ -ForegroundColor Red }
             throw "T-SQL Execution failed with exit code $LASTEXITCODE" 
         }
     }
@@ -94,7 +100,31 @@ function Invoke-Tsql {
 Info "--- Starting Provisioning for Database: $DatabaseName ---"
 Info "SQL Instance: $SqlInstance"
 Info "Backup Folder: $BackupFolder"
+Info "Backup Folder: $BackupFolder"
+Info "Start Time: $StartTime"
 Info "Retention: $KeepDays days"
+
+# Calculate Schedules
+try {
+    $tsStart = [TimeSpan]::Parse($StartTime)
+    $tsSecondary = $tsStart.Add([TimeSpan]::FromHours(12))
+    
+    # Normalize to 24h format if > 24h
+    if ($tsSecondary.TotalHours -ge 24) {
+        $tsSecondary = $tsSecondary.Subtract([TimeSpan]::FromHours(24))
+    }
+
+    # Format for SQL Agent (HHmmss)
+    $sqlStartTime = "{0:D2}{1:D2}00" -f $tsStart.Hours, $tsStart.Minutes
+    $sqlSecondaryTime = "{0:D2}{1:D2}00" -f $tsSecondary.Hours, $tsSecondary.Minutes
+    
+    Info "Schedule Calculation:"
+    Info "  - Primary Slot:   $($tsStart.ToString("hh\:mm")) ($sqlStartTime)"
+    Info "  - Secondary Slot: $($tsSecondary.ToString("hh\:mm")) ($sqlSecondaryTime)"
+}
+catch {
+    throw "Invalid StartTime format. Use HH:mm (e.g. 21:00)"
+}
 
 # Validate backup folder
 if (-not $DryRun) {
@@ -178,7 +208,7 @@ catch {
 # ---- [Step 2] Weekly Full Job (Sun 21:00) ----
 Info "[Step 2] Creating Weekly Full Backup job..."
 
-$jobF = "Weekly Full Backup (Sun 21:00) - $DatabaseName"
+$jobF = "Weekly Full Backup (Sun $($tsStart.ToString("hh\:mm"))) - $DatabaseName"
 $fullSql = @"
 USE [msdb];
 
@@ -188,7 +218,7 @@ BEGIN
     EXEC sp_add_job 
         @job_name = N'$jobF', 
         @owner_login_name = N'$owner',
-        @description = N'Weekly full backup for $DatabaseName (12/7 Strategy)',
+        @description = N'Weekly Full Backup for $DatabaseName (12/7 Strategy)',
         @category_name = N'Database Maintenance';
     PRINT 'Created job: $jobF';
 END
@@ -217,26 +247,26 @@ BEGIN
     PRINT 'Created job step: Full Backup';
 END
 
--- Create schedule: Sunday 21:00
-IF NOT EXISTS (SELECT 1 FROM sysschedules WHERE name = N'WeeklySun2100')
+-- Schedule: Weekly on Sunday
+IF NOT EXISTS (SELECT 1 FROM sysschedules WHERE name = N'WeeklyFullSchedule')
 BEGIN
     EXEC sp_add_schedule 
-        @schedule_name = N'WeeklySun2100', 
+        @schedule_name = N'WeeklyFullSchedule', 
         @freq_type = 8,              -- Weekly
-        @freq_interval = 1,          -- Sunday (1=Sunday, 2=Monday, etc.)
+        @freq_interval = 1,          -- Sunday
         @freq_recurrence_factor = 1, -- Every week
-        @active_start_time = 210000; -- 21:00:00
-    PRINT 'Created schedule: WeeklySun2100';
+        @active_start_time = $sqlStartTime; 
+    PRINT 'Created schedule: WeeklyFullSchedule';
 END
 
--- Attach schedule to job
+-- Attach schedule
 IF NOT EXISTS (SELECT 1 FROM sysjobschedules js 
     JOIN sysjobs j ON j.job_id = js.job_id 
     JOIN sysschedules s ON s.schedule_id = js.schedule_id
-    WHERE j.name = N'$jobF' AND s.name = N'WeeklySun2100')
+    WHERE j.name = N'$jobF' AND s.name = N'WeeklyFullSchedule')
 BEGIN
-    EXEC sp_attach_schedule @job_name = N'$jobF', @schedule_name = N'WeeklySun2100';
-    PRINT 'Attached schedule to job';
+    EXEC sp_attach_schedule @job_name = N'$jobF', @schedule_name = N'WeeklyFullSchedule';
+    PRINT 'Attached WeeklyFullSchedule schedule';
 END
 
 -- Add job to server
@@ -259,7 +289,7 @@ catch {
 # ---- [Step 3] 12h Differential Job (09:00 Daily, 21:00 Mon-Sat) ----
 Info "[Step 3] Creating 12h Differential Backup job..."
 
-$jobD = "12h Differential Backup (09/21) - $DatabaseName"
+$jobD = "12h Differential Backup ($($tsSecondary.ToString("hh"))/$($tsStart.ToString("hh"))) - $DatabaseName"
 $diffSql = @"
 USE [msdb];
 
@@ -298,47 +328,47 @@ BEGIN
     PRINT 'Created job step: Diff Backup';
 END
 
--- Schedule 1: Daily 09:00 (including Sunday)
-IF NOT EXISTS (SELECT 1 FROM sysschedules WHERE name = N'Daily0900')
+-- Schedule 1: Daily Secondary Slot (e.g. 09:00)
+IF NOT EXISTS (SELECT 1 FROM sysschedules WHERE name = N'DailyDiffSchedule')
 BEGIN
     EXEC sp_add_schedule 
-        @schedule_name = N'Daily0900', 
+        @schedule_name = N'DailyDiffSchedule', 
         @freq_type = 4,              -- Daily
         @freq_interval = 1,          -- Every 1 day
-        @active_start_time = 090000; -- 09:00:00
-    PRINT 'Created schedule: Daily0900';
+        @active_start_time = $sqlSecondaryTime; 
+    PRINT 'Created schedule: DailyDiffSchedule';
 END
 
--- Schedule 2: Monday-Saturday 21:00 (exclude Sunday which has Full backup)
+-- Schedule 2: Monday-Saturday Primary Slot (e.g. 21:00) - exclude Sunday
 -- freq_interval bit mask: Mon(2) + Tue(4) + Wed(8) + Thu(16) + Fri(32) + Sat(64) = 126
-IF NOT EXISTS (SELECT 1 FROM sysschedules WHERE name = N'MonSat2100')
+IF NOT EXISTS (SELECT 1 FROM sysschedules WHERE name = N'MonSatDiffSchedule')
 BEGIN
     EXEC sp_add_schedule 
-        @schedule_name = N'MonSat2100', 
+        @schedule_name = N'MonSatDiffSchedule', 
         @freq_type = 8,              -- Weekly
         @freq_interval = 126,        -- Mon-Sat (binary: 1111110)
         @freq_recurrence_factor = 1, -- Every week
-        @active_start_time = 210000; -- 21:00:00
-    PRINT 'Created schedule: MonSat2100';
+        @active_start_time = $sqlStartTime; 
+    PRINT 'Created schedule: MonSatDiffSchedule';
 END
 
 -- Attach schedules to job
 IF NOT EXISTS (SELECT 1 FROM sysjobschedules js 
     JOIN sysjobs j ON j.job_id = js.job_id 
     JOIN sysschedules s ON s.schedule_id = js.schedule_id
-    WHERE j.name = N'$jobD' AND s.name = N'Daily0900')
+    WHERE j.name = N'$jobD' AND s.name = N'DailyDiffSchedule')
 BEGIN
-    EXEC sp_attach_schedule @job_name = N'$jobD', @schedule_name = N'Daily0900';
-    PRINT 'Attached Daily0900 schedule';
+    EXEC sp_attach_schedule @job_name = N'$jobD', @schedule_name = N'DailyDiffSchedule';
+    PRINT 'Attached DailyDiffSchedule schedule';
 END
 
 IF NOT EXISTS (SELECT 1 FROM sysjobschedules js 
     JOIN sysjobs j ON j.job_id = js.job_id 
     JOIN sysschedules s ON s.schedule_id = js.schedule_id
-    WHERE j.name = N'$jobD' AND s.name = N'MonSat2100')
+    WHERE j.name = N'$jobD' AND s.name = N'MonSatDiffSchedule')
 BEGIN
-    EXEC sp_attach_schedule @job_name = N'$jobD', @schedule_name = N'MonSat2100';
-    PRINT 'Attached MonSat2100 schedule';
+    EXEC sp_attach_schedule @job_name = N'$jobD', @schedule_name = N'MonSatDiffSchedule';
+    PRINT 'Attached MonSatDiffSchedule schedule';
 END
 
 -- Add job to server
@@ -367,8 +397,8 @@ Success "Backup Jobs Provisioned Successfully!"
 Write-Host "========================================" -ForegroundColor Green
 Write-Host ""
 Info "Backup Schedule Summary:"
-Write-Host "  • Full Backup:        Sunday 21:00" -ForegroundColor White
-Write-Host "  • Differential:       Daily 09:00 + Monday-Saturday 21:00" -ForegroundColor White
+Write-Host "  • Full Backup:        Sunday $($tsStart.ToString("hh\:mm"))" -ForegroundColor White
+Write-Host "  • Differential:       Daily $($tsSecondary.ToString("hh\:mm")) + Monday-Saturday $($tsStart.ToString("hh\:mm"))" -ForegroundColor White
 Write-Host "  • Cleanup:            (See Provision-Cleanup.ps1)" -ForegroundColor White
 Write-Host "  • Recovery Model:     SIMPLE" -ForegroundColor White
 Write-Host "  • RPO:                12 hours" -ForegroundColor White

@@ -1,5 +1,5 @@
 # Change Advisory Board (CAB) Presentation
-## Title: Implementation of 12/7 SQL Backup & Storage Optimization
+## Title: Implementation of 12/7 SQL Backup Strategy
 
 > **Date:** 2026-01-07
 > **Presenter:** DevOps Team
@@ -20,6 +20,7 @@
 ### 2. Change Scope
 - **Deploy Scripts:**
     - `Provision-Backup-12-7-Final.ps1`: สร้าง Backup Job และ Force Set Recovery Model เป็น **SIMPLE**
+    - `Provision-BackupUser.ps1`: สำหรับสร้าง Service Account และกำหนดสิทธิ์
 - **Target System:** Database `PRSystem`
 - **Cleanup Process:** SysAdmin จะดูแลการลบไฟล์เก่า (Manual Process)
 
@@ -44,12 +45,10 @@
 
 ### 4. Implementation Steps
 1.  **Prep:** เช็ค Disk Space (ต้องว่าง > 30GB สำหรับ Backup ก่อน Shrink)
-2.  **Execute Script:** รัน `Provision-Backup-12-7-Final.ps1` (Script จะปรับ Recovery Model เป็น SIMPLE ให้อัตโนมัติ)
-3.  **Full Backup:** สั่ง Start Job "Weekly Full Backup" ทันที
-4.  **Optimization (Critical Step):**
-    - เมื่อ Backup เสร็จสิ้น และ Log ถูก Truncate แล้ว
-    - สั่ง **DBCC SHRINKFILE** (เฉพาะ Log File) เพื่อคืนพื้นที่ 50GB
-5.  **Verify:** ตรวจสอบขนาดไฟล์ Log ต้องเล็กลง และ Full Backup ต้องสมบูรณ์
+2.  **Create User:** รัน `Provision-BackupUser.ps1`
+3.  **Execute Provisioning:** รัน PowerShell Script เพื่อสร้าง Job บน SQL Agent
+4.  **Full Backup:** สั่ง Start Job "Weekly Full Backup" ทันที
+5.  **Optimization:** รัน `DBCC SHRINKFILE` เพื่อคืนพื้นที่ 50GB
 
 ---
 
@@ -62,7 +61,7 @@
 ---
 
 ### 6. Rollback Plan
-1.  **Restore:** หากข้อมูลเสียหาย ให้ Restore จากไฟล์ Full Backup ที่ทำไว้ในขั้นตอนที่ 3
+1.  **Restore:** หากข้อมูลเสียหาย ให้ Restore จากไฟล์ Full Backup ที่ทำไว้ในขั้นตอนที่ 4
 2.  **Revert Job:** Disable SQL Agent Job ที่สร้างใหม่
 
 ---

@@ -28,12 +28,15 @@ This solution provisions a secure, automated backup strategy for SQL Server data
 Run this as a standard user or admin. This sets up the core data protection.
 
 ```powershell
-.\Provision-Backup-12-7-Final.ps1 -SqlInstance "LOCALHOST" -DatabaseName "TargetDB" -BackupFolder "C:\Backups"
+.\Provision-Backup-12-7-Final.ps1 -SqlInstance "LOCALHOST" -DatabaseName "TargetDB" -BackupFolder "C:\Backups" -StartTime "21:00"
 ```
 
+**Parameters:**
+- `StartTime`: (Optional) The time for the primary backup slot (e.g., "22:30"). The secondary slot is automatically calculated +12h later. Default is "21:00".
+
 **Outcome:**
--   Job: `Weekly Full Backup (Sun 21:00) - TargetDB` created.
--   Job: `12h Differential Backup (09/21) - TargetDB` created.
+-   Job: `Weekly Full Backup (Sun [StartTime]) - TargetDB` created.
+-   Job: `12h Differential Backup (Daily) - TargetDB` created.
 -   **Note:** These jobs run as the specified owner (default `sqlbackup`).
 
 ### Step 2: Provision Cleanup Job
@@ -56,7 +59,10 @@ Run this as an Administrator (`sysadmin`). This sets up the maintenance task.
     -   `Weekly Full Backup...`
     -   `12h Differential Backup...`
     -   `Backup Cleanup...`
-4.  **Right-click** the Cleanup job > **Properties**. Ensure **Owner** is `sa`.
+4.  **Verify Schedules:** 
+    -   Check that the Full Backup runs at the specified `-StartTime`.
+    -   Check that the Differential Backup has two schedules: one at `-StartTime` (Mon-Sat) and one at `StartTime + 12h` (Daily).
+5.  **Right-click** the Cleanup job > **Properties**. Ensure **Owner** is `sa`.
 
 ---
 
@@ -79,3 +85,58 @@ To remove the provisioning:
 1.  Open SSMS > SQL Server Agent > Jobs.
 2.  Delete the 3 jobs associated with the database.
 3.  (Optional) Remove `sqlbackup` user from the database if no longer needed.
+
+---
+
+## 7. Disaster Recovery (Restore Procedure)
+
+> **CRITICAL:** Before restoring, ensure you have identified the correct point-in-time you wish to return to. The 12/7 strategy creates a dependency chain: **Last Full Backup** -> **Latest Differential Backup**.
+
+### Scenario: Restore to the latest available point
+Suppose you need to restore `TargetDB` after a crash on **Wednesday morning (10:00)**.
+Required Files:
+1.  **Weekly Full Backup:** From Sunday night.
+2.  **Latest Differential Backup:** From Wednesday morning (09:00, if it ran) or Tuesday night (21:00).
+
+### Step 1: Restore Weekly Full Backup (NORECOVERY)
+The database must remain in a `RESTORING` state to accept subsequent differential backups. **DO NOT** bring the database online yet.
+
+```sql
+USE [master];
+-- Close active connections (Optional but recommended)
+ALTER DATABASE [TargetDB] SET SINGLE_USER WITH ROLLBACK IMMEDIATE;
+
+RESTORE DATABASE [TargetDB] 
+FROM DISK = N'C:\Backups\TargetDB_FULL_YYYYMMDD_HHMMSS.bak'
+WITH 
+    NORECOVERY, -- Keep database in 'Restoring' state
+    REPLACE,    -- Overwrite existing database if necessary
+    STATS = 10;
+```
+
+### Step 2: Restore Latest Differential Backup (RECOVERY)
+This applies all changes since the full backup and brings the database online.
+
+```sql
+RESTORE DATABASE [TargetDB] 
+FROM DISK = N'C:\Backups\TargetDB_DIFF_YYYYMMDD_HHMMSS.dif'
+WITH 
+    RECOVERY,   -- Bring database ONLINE
+    STATS = 10;
+```
+
+### Step 3: Verify and Reset Access
+```sql
+USE [master];
+-- Set multi-user mode back
+ALTER DATABASE [TargetDB] SET MULTI_USER;
+
+-- Verify
+USE [TargetDB];
+SELECT count(*) FROM [SomeCriticalTable];
+```
+
+### FAQ: What if I only have a Full Backup?
+If you just want to restore the Full Backup (e.g., from Sunday) and ignore the differentials:
+-   Change Step 1 to use `WITH RECOVERY` directly.
+-   Skip Step 2.
