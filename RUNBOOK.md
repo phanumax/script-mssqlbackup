@@ -153,3 +153,39 @@ SELECT count(*) FROM [SomeCriticalTable];
 If you just want to restore the Full Backup (e.g., from Sunday) and ignore the differentials:
 -   Change Step 1 to use `WITH RECOVERY` directly.
 -   Skip Step 2.
+
+---
+
+## 8. Backup Verification Drill (Monthly)
+> **Ops Axiom:** "Verify Everything." Backups are useless if they cannot be restored.
+
+Perform this drill monthly to ensure data integrity and process validity.
+
+### Step 1: Restore to a Test Database
+Do **not** overwrite the production database. Restore as `_Verify`.
+
+```sql
+USE [master];
+-- Restore Full Backup as a NEW database
+RESTORE DATABASE [TargetDB_Verify] 
+FROM DISK = N'C:\Backups\TargetDB_FULL_YYYYMMDD_HHMMSS.bak'
+WITH 
+    MOVE 'TargetDB' TO 'C:\Backups\TargetDB_Verify.mdf',      -- Move Data File
+    MOVE 'TargetDB_log' TO 'C:\Backups\TargetDB_Verify.ldf',  -- Move Log File
+    RECOVERY, 
+    STATS = 10;
+```
+
+### Step 2: Validate Data Integrity
+Run a consistency check on the restored database.
+```sql
+DBCC CHECKDB (N'TargetDB_Verify') WITH NO_INFOMSGS;
+-- Result should be: "DBCC execution completed. If DBCC printed error messages, contact your system administrator."
+```
+
+### Step 3: Cleanup
+Once verified, drop the test database to free up space.
+```sql
+DROP DATABASE [TargetDB_Verify];
+```
+
