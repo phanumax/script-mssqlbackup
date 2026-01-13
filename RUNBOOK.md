@@ -78,6 +78,19 @@ Re-run `Provision-Cleanup.ps1`. It enforces `sa` ownership.
 -   Check the **Job History** in SSMS.
 -   Ensure the `BackupFolder` path exists and the SQL Agent Service Account has **Write/Modify** permissions on that folder.
 
+### Script Not Digitally Signed / UnauthorizedAccess
+**Symptom:** `File ... cannot be loaded. The file ... is not digitally signed.`
+**Cause:** PowerShell Execution Policy blocks running unsigned scripts downloaded from the internet.
+**Fix:**
+Run the script with the Bypass flag:
+```powershell
+PowerShell.exe -ExecutionPolicy Bypass -File .\Provision-Backup-12-7-Final.ps1 ...
+```
+Or unblock the file permanently:
+```powershell
+Unblock-File -Path .\Provision-Backup-12-7-Final.ps1
+```
+
 ---
 
 ## 6. Rollback / Uninstall
